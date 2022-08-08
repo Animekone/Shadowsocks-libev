@@ -1,668 +1,666 @@
-#!/usr/bin/env bash
-PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
-export PATH
+#!/bin/bash
+# shadowsocks/ss一键安装脚本
+# Author: Animekone
 
-#=================================================
-#	System Required: CentOS/Debian/Ubuntu
-#	Description: Shadowsocks libev 管理脚本
-#	Author: Aniemkone
-#	WebSite: https://github.com/Animekone
-#=================================================
 
-sh_ver="1.3.0"
-filepath=$(cd "$(dirname "$0")"; pwd)
-file_1=$(echo -e "${filepath}"|awk -F "$0" '{print $1}')
-FOLDER="/etc/shadowsocks-libev"
-FILE="/usr/local/bin/ss-server"
-CONF="/etc/shadowsocks-libev/config.json"
-Now_ver_File="/etc/shadowsocks-libev/ver.txt"
-Local="/etc/sysctl.d/local.conf"
+RED="\033[31m"      # Error message
+GREEN="\033[32m"    # Success message
+YELLOW="\033[33m"   # Warning message
+BLUE="\033[36m"     # Info message
+PLAIN='\033[0m'
 
-libsodium_file="libsodium-1.0.18"
-libsodium_url="https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/libsodium-1.0.18.tar.gz"
+BASE=`pwd`
+OS=`hostnamectl | grep -i system | cut -d: -f2`
 
-mbedtls_file='mbedtls-2.28.0'
-mbedtls_url='https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v2.28.0.tar.gz'
+NAME="shadowsocks-libev"
+CONFIG_FILE="/etc/${NAME}/config.json"
+SERVICE_FILE="/etc/systemd/system/${NAME}.service"
 
-Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Red_background_prefix="\033[41;37m" && Font_color_suffix="\033[0m" && Yellow_font_prefix="\033[0;33m"
-Info="${Green_font_prefix}[信息]${Font_color_suffix}"
-Error="${Red_font_prefix}[错误]${Font_color_suffix}"
-Tip="${Yellow_font_prefix}[注意]${Font_color_suffix}"
+V6_PROXY=""
+IP=`curl -sL -4 ip.sb`
+if [[ "$?" != "0" ]]; then
+    IP=`curl -sL -6 ip.sb`
+    V6_PROXY="https://gh.hijk.art/"
+fi
 
-install_libsodium() {
-    if [ ! -f /usr/lib/libsodium.a ]; then
-		wget --no-check-certificate -cq -t3 -T60 -O "${libsodium_file}.tar.gz" "${libsodium_url}"
-        tar -xzf ${libsodium_file}.tar.gz
-        cd ${libsodium_file} || exit
-        ./configure --prefix=/usr && make && make install
-        if [ $? -ne 0 ]; then
-            echo -e "${Error} ${libsodium_file} 安装失败！"
+colorEcho() {
+    echo -e "${1}${@:2}${PLAIN}"
+}
+
+checkSystem() {
+    result=$(id | awk '{print $1}')
+    if [[ $result != "uid=0(root)" ]]; then
+        colorEcho $RED " 请以root身份执行该脚本"
+        exit 1
+    fi
+
+    res=`which yum 2>/dev/null`
+    if [[ "$?" != "0" ]]; then
+        res=`which apt 2>/dev/null`
+        if [[ "$?" != "0" ]]; then
+            colorEcho $RED " 不受支持的Linux系统"
             exit 1
         fi
+        PMT="apt"
+        CMD_INSTALL="apt install -y "
+        CMD_REMOVE="apt remove -y "
+        CMD_UPGRADE="apt update; apt upgrade -y; apt autoremove -y"
     else
-        echo -e "${Info} ${libsodium_file} 已经安装！"
+        PMT="yum"
+        CMD_INSTALL="yum install -y "
+        CMD_REMOVE="yum remove -y "
+        CMD_UPGRADE="yum update -y"
+    fi
+    res=`which systemctl 2>/dev/null`
+    if [[ "$?" != "0" ]]; then
+        colorEcho $RED " 系统版本过低，请升级到最新版本"
+        exit 1
     fi
 }
 
-install_mbedtls() {
-    if [ ! -f /usr/lib/libmbedtls.a ]; then
-		wget --no-check-certificate -cq -t3 -T60 -O "${mbedtls_file}.tar.gz" "${mbedtls_url}"
-        tar -xzf "${mbedtls_file}".tar.gz
-        cd "${mbedtls_file}" || exit
-        make SHARED=1 CFLAGS=-fPIC
-        make DESTDIR=/usr install
-        if [ $? -ne 0 ]; then
-            echo -e "${Error} ${mbedtls_file} 安装失败！"
+status() {
+    export PATH=/usr/local/bin:$PATH
+    cmd="$(command -v ss-server)"
+    if [[ "$cmd" = "" ]]; then
+        echo 0
+        return
+    fi
+    if [[ ! -f $CONFIG_FILE ]]; then
+        echo 1
+        return
+    fi
+    port=`grep server_port $CONFIG_FILE|cut -d: -f2| tr -d \",' '`
+    res=`ss -ntlp| grep ${port} | grep ss-server`
+    if [[ -z "$res" ]]; then
+        echo 2
+    else
+        echo 3
+    fi
+}
+
+statusText() {
+    res=`status`
+    case $res in
+        2)
+            echo -e ${GREEN}已安装${PLAIN} ${RED}未运行${PLAIN}
+            ;;
+        3)
+            echo -e ${GREEN}已安装${PLAIN} ${GREEN}正在运行${PLAIN}
+            ;;
+        *)
+            echo -e ${RED}未安装${PLAIN}
+            ;;
+    esac
+}
+
+getData() {
+    echo ""
+    read -p " 请设置SS的密码（不输入则随机生成）:" PASSWORD
+    [[ -z "$PASSWORD" ]] && PASSWORD=`cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1`
+    echo ""
+    colorEcho $BLUE " 密码： $PASSWORD"
+
+    echo ""
+    while true
+    do
+        read -p " 请设置SS的端口号[1025-65535]:" PORT
+        [[ -z "$PORT" ]] && PORT=`shuf -i1025-65000 -n1`
+        if [[ "${PORT:0:1}" = "0" ]]; then
+            echo -e " ${RED}端口不能以0开头${PLAIN}"
             exit 1
         fi
+        expr $PORT + 0 &>/dev/null
+        if [[ $? -eq 0 ]]; then
+            if [[ $PORT -ge 1025 ]] && [[ $PORT -le 65535 ]]; then
+                echo ""
+                colorEcho $BLUE " 端口号： $PORT"
+                echo ""
+                break
+            else
+                colorEcho $RED " 输入错误，端口号为1025-65535的数字"
+            fi
+        else
+            colorEcho $RED " 输入错误，端口号为1025-65535的数字"
+        fi
+    done
+    colorEcho $RED " 请选择加密方式:" 
+    echo "  1)aes-256-gcm"
+    echo "  2)aes-192-gcm"
+    echo "  3)aes-128-gcm"
+    echo "  4)aes-256-ctr"
+    echo "  5)aes-192-ctr"
+    echo "  6)aes-128-ctr"
+    echo "  7)aes-256-cfb"
+    echo "  8)aes-192-cfb"
+    echo "  9)aes-128-cfb"
+    echo "  10)camellia-128-cfb"
+    echo "  11)camellia-192-cfb"
+    echo "  12)camellia-256-cfb"
+    echo "  13)chacha20-ietf"
+    echo "  14)chacha20-ietf-poly1305"
+    echo "  15)xchacha20-ietf-poly1305"
+    read -p " 请选择（默认aes-256-gcm）" answer
+    if [[ -z "$answer" ]]; then
+        METHOD="aes-256-gcm"
     else
-        echo -e "${Info} ${mbedtls_file} 已经安装！"
+        case $answer in
+        1)
+            METHOD="aes-256-gcm"
+            ;;
+        2)
+            METHOD="aes-192-gcm"
+            ;;
+        3)
+            METHOD="aes-128-gcm"
+            ;;
+        4)
+            METHOD="aes-256-ctr"
+            ;;
+        5)
+            METHOD="aes-192-ctr"
+            ;;
+        6)
+            METHOD="aes-128-ctr"
+            ;;
+        7)
+            METHOD="aes-256-cfb"
+            ;;
+        8)
+            METHOD="aes-192-cfb"
+            ;;
+        9)
+            METHOD="aes-128-cfb"
+            ;;
+        10)
+            METHOD="camellia-128-cfb"
+            ;;
+        11)
+            METHOD="camellia-192-cfb"
+            ;;
+        12)
+            METHOD="camellia-256-cfb"
+            ;;
+        13)
+            METHOD="chacha20-ietf"
+            ;;
+        14)
+            METHOD="chacha20-ietf-poly1305"
+            ;;
+        15)
+            METHOD="xchacha20-ietf-poly1305"
+            ;;
+        *)
+            colorEcho $RED " 无效的选择，使用默认的aes-256-gcm"
+            METHOD="aes-256-gcm"
+        esac
+    fi
+    echo ""
+    colorEcho $BLUE "加密方式： $METHOD"
+}
+
+preinstall() {
+    $PMT clean all
+    #echo $CMD_UPGRADE | bash
+    [[ "$PMT" = "apt" ]] && $PMT update
+
+    echo ""
+    colorEcho $BULE " 安装必要软件"
+    if [[ "$PMT" = "yum" ]]; then
+        $CMD_INSTALL epel-release
+    fi
+    $CMD_INSTALL wget vim net-tools unzip tar qrencode
+    $CMD_INSTALL openssl gettext gcc autoconf libtool automake make asciidoc xmlto
+    if [[ "$PMT" = "yum" ]]; then
+        $CMD_INSTALL openssl-devel udns-devel libev-devel pcre pcre-devel mbedtls mbedtls-devel libsodium libsodium-devel c-ares c-ares-devel
+    else
+        $CMD_INSTALL libssl-dev libudns-dev libev-dev libpcre3 libpcre3-dev libmbedtls-dev libc-ares2 libc-ares-dev g++
+        $CMD_INSTALL libsodium*
+    fi
+    res=`which wget 2>/dev/null`
+    [[ "$?" != "0" ]] && $CMD_INSTALL wget
+    res=`which netstat 2>/dev/null`
+    [[ "$?" != "0" ]] && $CMD_INSTALL net-tools
+
+    if [[ -s /etc/selinux/config ]] && grep 'SELINUX=enforcing' /etc/selinux/config; then
+        sed -i 's/SELINUX=enforcing/SELINUX=permissive/g' /etc/selinux/config
+        setenforce 0
     fi
 }
 
-check_root(){
-	[[ $EUID != 0 ]] && echo -e "${Error} 当前非ROOT账号(或没有ROOT权限)，无法继续操作，请更换ROOT账号或使用 ${Green_background_prefix}sudo su${Font_color_suffix} 命令获取临时ROOT权限（执行后可能会提示输入当前账号的密码）。" && exit 1
-}
-
-check_sys(){
-	if [[ -f /etc/redhat-release ]]; then
-		release="centos"
-	elif cat /etc/issue | grep -q -E -i "debian"; then
-		release="debian"
-	elif cat /etc/issue | grep -q -E -i "ubuntu"; then
-		release="ubuntu"
-	elif cat /etc/issue | grep -q -E -i "centos|red hat|redhat"; then
-		release="centos"
-	elif cat /proc/version | grep -q -E -i "debian"; then
-		release="debian"
-	elif cat /proc/version | grep -q -E -i "ubuntu"; then
-		release="ubuntu"
-	elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
-		release="centos"
+normalizeVersion() {
+    if [ -n "$1" ]; then
+        case "$1" in
+            v*)
+                echo "${1:1}"
+            ;;
+            *)
+                echo "$1"
+            ;;
+        esac
+    else
+        echo ""
     fi
 }
 
-#开启系统 TCP Fast Open
-enable_systfo() {
-	kernel=$(uname -r | awk -F . '{print $1}')
-	if [ "$kernel" -ge 3 ]; then
-		echo 3 >/proc/sys/net/ipv4/tcp_fastopen
-		[[ ! -e $Local ]] && echo "fs.file-max = 51200
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
-net.core.rmem_default = 65536
-net.core.wmem_default = 65536
-net.core.netdev_max_backlog = 4096
-net.core.somaxconn = 4096
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_tw_recycle = 0
-net.ipv4.tcp_fin_timeout = 30
-net.ipv4.tcp_keepalive_time = 1200
-net.ipv4.ip_local_port_range = 10000 65000
-net.ipv4.tcp_max_syn_backlog = 4096
-net.ipv4.tcp_max_tw_buckets = 5000
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_rmem = 4096 87380 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
-net.ipv4.tcp_mtu_probing = 1
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control = bbr" >>/etc/sysctl.d/local.conf && sysctl --system >/dev/null 2>&1
-	else
-		echo -e "$Error系统内核版本过低，无法支持 TCP Fast Open ！"
-	fi
-}
-
-check_installed_status(){
-	[[ ! -e ${FILE} ]] && echo -e "${Error} Shadowsocks-libev 没有安装，请检查 !" && exit 1
-}
-
-check_status(){
-	status=`systemctl status shadowsocks-libev | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1`
-}
-
-get_latest_version(){
-    ver=$(wget --no-check-certificate -qO- https://api.github.com/repos/shadowsocks/shadowsocks-libev/releases/latest | grep 'tag_name' | cut -d\" -f4)
-    [ -z "${ver}" ] && echo "Shadowsocks-libev 版本获取失败！" && exit 1
-    shadowsocks_libev_ver="shadowsocks-libev-$(echo "${ver}" | sed -e 's/^[a-zA-Z]//g')"
-    download_link="https://github.com/shadowsocks/shadowsocks-libev/releases/download/${ver}/${shadowsocks_libev_ver}.tar.gz"
-}
-
-check_new_ver(){
-	new_ver=$(wget -qO- https://api.github.com/repos/shadowsocks/shadowsocks-libev/releases | jq -r '[.[] | select(.prerelease == false) | select(.draft == false) | .tag_name] | .[0]')
-	[[ -z ${new_ver} ]] && echo -e "${Error} Shadowsocks-libev 最新版本获取失败！" && exit 1
-	echo -e "${Info} 检测到 Shadowsocks-libev 最新版本为 [ ${new_ver} ]"
-}
-
-check_ver_comparison(){
-	now_ver=$(cat ${Now_ver_File})
-	if [[ "${now_ver}" != "${new_ver}" ]]; then
-		echo -e "${Info} 发现 Shadowsocks-libev 已有新版本 [ ${new_ver} ]，旧版本 [ ${now_ver} ]"
-		read -e -p "是否更新 ? [Y/n] :" yn
-		[[ -z "${yn}" ]] && yn="y"
-		if [[ $yn == [Yy] ]]; then
-			check_status
-			# [[ "$status" == "running" ]] && systemctl stop shadowsocks-libev
-			\cp "${CONF}" "/tmp/config.json"
-			# rm -rf ${FOLDER}
-			Pre_install
-			mv -f "/tmp/config.json" "${CONF}"
-			Restart
-		fi
-	else
-		echo -e "${Info} 当前 Shadowsocks-libev 已是最新版本 [ ${new_ver} ]" && exit 1
-	fi
-}
-
-Pre_install(){
-	if [[ ! -e "${FOLDER}" ]]; then
-		mkdir "${FOLDER}"
-	# else
-		# [[ -e "${FILE}" ]] && rm -rf "${FILE}"
-	fi
-	echo -e "${Info} 开始编译安装 Shadowsocks-libev……"
-    install_libsodium
-    install_mbedtls
-    ldconfig
-	wget --no-check-certificate -cq -t3 -T60 -O "${shadowsocks_libev_ver}.tar.gz" "${download_link}"
-    tar -xzf "${shadowsocks_libev_ver}".tar.gz
-    cd "${shadowsocks_libev_ver}" || exit
-    ./configure --disable-documentation
+installNewVer() {
+    new_ver=$1
+    if ! wget "${V6_PROXY}https://github.com/shadowsocks/shadowsocks-libev/releases/download/v${new_ver}/shadowsocks-libev-${new_ver}.tar.gz" -O ${NAME}.tar.gz; then
+        colorEcho $RED " 下载安装文件失败！"
+        exit 1
+    fi
+    tar zxf ${NAME}.tar.gz
+    cd shadowsocks-libev-${new_ver}
+    ./configure
     make && make install
-    echo "${new_ver}" > ${Now_ver_File}
-    echo -e "${Info} Shadowsocks-libev 主程序编译安装完毕！"
-    cd /root || exit
-    rm -rf "${shadowsocks_libev_ver}" "${shadowsocks_libev_ver}".tar.gz
-    rm -rf ${libsodium_file} ${libsodium_file}.tar.gz
-    rm -rf "${mbedtls_file}" "${mbedtls_file}"-apache.tgz
-}
-
-Service(){
-	echo '
+    if [[ $? -ne 0 ]]; then
+        echo
+        echo -e " [${RED}错误${PLAIN}]: $OS Shadowsocks-libev 安装失败！ 请打开 https://tizi.blog 反馈"
+        cd ${BASE} && rm -rf shadowsocks-libev*
+        exit 1
+    fi
+    ssPath=`which ss-server 2>/dev/null`
+    [[ "$ssPath" != "" ]] || {
+        cd ${BASE} && rm -rf shadowsocks-libev*
+        colorEcho $RED " SS安装失败，请到 https://tizi.blog 反馈"
+        exit 1
+    }
+    cat > $SERVICE_FILE <<-EOF
 [Unit]
-Description= Shadowsocks libev Service
+Description=shadowsocks
+Documentation=https://tizi.blog
 After=network-online.target
-Wants=network-online.target systemd-networkd-wait-online.service
+Wants=network-online.target
+
 [Service]
-LimitNOFILE=32767 
 Type=simple
-User=root
-Restart=on-failure
-RestartSec=5s
-ExecStartPre=/bin/sh -c 'ulimit -n 51200'
-ExecStart=/usr/local/bin/ss-server -c /etc/shadowsocks-libev/config.json
+PIDFile=/var/run/${NAME}.pid
+LimitNOFILE=32768
+ExecStart=$ssPath -c $CONFIG_FILE -f /var/run/${NAME}.pid
+ExecReload=/bin/kill -s HUP \$MAINPID
+ExecStop=/bin/kill -s TERM \$MAINPID
+
 [Install]
-WantedBy=multi-user.target' > /etc/systemd/system/shadowsocks-libev.service
-systemctl enable --now shadowsocks-libev
-	echo -e "${Info} Shadowsocks-libev 服务配置完成 !"
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable ${NAME}
+    cd ${BASE} && rm -rf shadowsocks-libev*
+
+    colorEcho $BLUE " 安装成功!"
 }
 
-Installation_dependency(){
-	if [[ ${release} == "centos" ]]; then
-		yum update && yum install epel-release -y && yum install gettext gcc autoconf libtool automake make asciidoc xmlto c-ares-devel libev-devel jq git unzip python2 c-ares-devel rng-tools -y
-	else
-		apt-get update && apt-get install --no-install-recommends gettext build-essential autoconf libtool libpcre3-dev asciidoc xmlto libev-dev libc-ares-dev automake libmbedtls-dev libsodium-dev jq git unzip python2 libc-ares2 libc-ares-dev libev-dev rng-tools -y
-	fi
-	HRNGDEVICE=/dev/urandom
-	rngd -r /dev/urandom
-	\cp -f /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+installSS() {
+    echo ""
+    colorEcho $BLUE " 安装最新版SS..."
+
+    tag_url="${V6_PROXY}https://api.github.com/repos/shadowsocks/shadowsocks-libev/releases/latest"
+    new_ver="$(normalizeVersion "$(curl -s "${tag_url}" --connect-timeout 10| grep 'tag_name' | cut -d\" -f4)")"
+    export PATH=/usr/local/bin:$PATH
+    ssPath=`which ss-server 2>/dev/null`
+    if [[ "$?" != "0" ]]; then
+        [[ "$new_ver" != "" ]] || new_ver="3.3.5"
+        installNewVer $new_ver
+    else
+        ver=`ss-server -h | grep ${NAME} | grep -oE '[0-9+\.]+'`
+        if [[ $ver != $new_ver ]]; then
+            installNewVer $new_ver
+        else
+            colorEcho $YELLOW " 已安装最新版SS"
+        fi
+    fi
 }
 
-Write_config(){
-	cat > ${CONF}<<-EOF
+configSS(){
+    interface="0.0.0.0"
+    if [[ "$V6_PROXY" != "" ]]; then
+        interface="::"
+    fi
+
+    mkdir -p /etc/${NAME}
+    cat > $CONFIG_FILE<<-EOF
 {
-    "server": ["0.0.0.0", "::1"],
-    "server_port": ${port},
-    "password": "${password}",
-    "method": "${cipher}",
-    "fast_open": ${tfo},
-    "mode": "tcp_and_udp",
-    "user": "nobody",
-    "timeout": 300,
-    "nameserver": "8.8.8.8"
+    "server":"$interface",
+    "server_port":${PORT},
+    "local_port":1080,
+    "password":"${PASSWORD}",
+    "timeout":600,
+    "method":"${METHOD}",
+    "nameserver":"8.8.8.8",
+    "mode":"tcp_and_udp",
+    "fast_open":false
 }
 EOF
 }
 
-Read_config(){
-	[[ ! -e ${CONF} ]] && echo -e "${Error} Shadowsocks-libev 配置文件不存在 !" && exit 1
-	port=$(cat ${CONF}|jq -r '.server_port')
-	password=$(cat ${CONF}|jq -r '.password')
-	cipher=$(cat ${CONF}|jq -r '.method')
-	tfo=$(cat ${CONF}|jq -r '.fast_open')
-}
-
-Set_port(){
-	while true
-		do
-		echo -e "${Tip} 本步骤不涉及系统防火墙端口操作，请手动放行相应端口！"
-		echo -e "请输入 Shadowsocks-libev 端口 [1-65535]"
-		read -e -p "(默认: 2525):" port
-		[[ -z "${port}" ]] && port="2525"
-		echo $((${port}+0)) &>/dev/null
-		if [[ $? -eq 0 ]]; then
-			if [[ ${port} -ge 1 ]] && [[ ${port} -le 65535 ]]; then
-				echo && echo "=================================="
-				echo -e "	端口 : ${Red_background_prefix} ${port} ${Font_color_suffix}"
-				echo "==================================" && echo
-				break
-			else
-				echo "输入错误, 请输入正确的端口。"
-			fi
-		else
-			echo "输入错误, 请输入正确的端口。"
-		fi
-		done
-}
-
-Set_tfo(){
-	echo -e "是否开启 TCP Fast Open ？
-==================================
-${Green_font_prefix} 1.${Font_color_suffix} 开启  ${Green_font_prefix} 2.${Font_color_suffix} 关闭
-=================================="
-	read -e -p "(默认：1.开启)：" tfo
-	[[ -z "${tfo}" ]] && tfo="1"
-	if [[ ${tfo} == "1" ]]; then
-		tfo=true
-		enable_systfo
-	else
-		tfo=false
-	fi
-	echo && echo "=================================="
-	echo -e "TCP Fast Open 开启状态：${Red_background_prefix} ${tfo} ${Font_color_suffix}"
-	echo "==================================" && echo
-}
-
-Set_password(){
-	echo "请输入 Shadowsocks-libev 密码 [0-9][a-z][A-Z]"
-	read -e -p "(默认: 随机生成):" password
-	[[ -z "${password}" ]] && password=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 16)
-	echo && echo "=================================="
-	echo -e "	密码 : ${Red_background_prefix} ${password} ${Font_color_suffix}"
-	echo "==================================" && echo
-}
-
-Set_cipher(){
-	echo -e "请选择 Shadowsocks-libev 加密方式
-==================================	
- ${Green_font_prefix} 1.${Font_color_suffix} chacha20-ietf-poly1305 ${Green_font_prefix}(推荐)${Font_color_suffix}
- ${Green_font_prefix} 2.${Font_color_suffix} aes-128-gcm ${Green_font_prefix}(推荐)${Font_color_suffix}
- ${Green_font_prefix} 3.${Font_color_suffix} aes-256-gcm ${Green_font_prefix}(推荐)${Font_color_suffix}
- ${Green_font_prefix} 4.${Font_color_suffix} plain ${Red_font_prefix}(不推荐)${Font_color_suffix}
- ${Green_font_prefix} 5.${Font_color_suffix} none ${Red_font_prefix}(不推荐)${Font_color_suffix}
- ${Green_font_prefix} 6.${Font_color_suffix} table
- ${Green_font_prefix} 7.${Font_color_suffix} aes-128-cfb
- ${Green_font_prefix} 8.${Font_color_suffix} aes-256-cfb
- ${Green_font_prefix} 9.${Font_color_suffix} aes-256-ctr 
- ${Green_font_prefix}10.${Font_color_suffix} camellia-256-cfb
- ${Green_font_prefix}11.${Font_color_suffix} rc4-md5
- ${Green_font_prefix}12.${Font_color_suffix} chacha20-ietf
-==================================
- ${Tip} 如需其它加密方式请手动修改配置文件 !" && echo
-	read -e -p "(默认: 1. chacha20-ietf-poly1305):" cipher
-	[[ -z "${cipher}" ]] && cipher="1"
-	if [[ ${cipher} == "1" ]]; then
-		cipher="chacha20-ietf-poly1305"
-	elif [[ ${cipher} == "2" ]]; then
-		cipher="aes-128-gcm"
-	elif [[ ${cipher} == "3" ]]; then
-		cipher="aes-256-gcm"
-	elif [[ ${cipher} == "4" ]]; then
-		cipher="plain"
-	elif [[ ${cipher} == "5" ]]; then
-		cipher="none"
-	elif [[ ${cipher} == "6" ]]; then
-		cipher="table"
-	elif [[ ${cipher} == "7" ]]; then
-		cipher="aes-128-cfb"
-	elif [[ ${cipher} == "8" ]]; then
-		cipher="aes-256-cfb"
-	elif [[ ${cipher} == "9" ]]; then
-		cipher="aes-256-ctr"
-	elif [[ ${cipher} == "10" ]]; then
-		cipher="camellia-256-cfb"
-	elif [[ ${cipher} == "11" ]]; then
-		cipher="arc4-md5"
-	elif [[ ${cipher} == "12" ]]; then
-		cipher="chacha20-ietf"
-	else
-		cipher="chacha20-ietf-poly1305"
-	fi
-	echo && echo "=================================="
-	echo -e "	加密 : ${Red_background_prefix} ${cipher} ${Font_color_suffix}"
-	echo "==================================" && echo
-}
-
-Set(){
-	check_installed_status
-	echo && echo -e "你要做什么？
-——————————————————————————————————
- ${Green_font_prefix}1.${Font_color_suffix}  修改 端口配置
- ${Green_font_prefix}2.${Font_color_suffix}  修改 密码配置
- ${Green_font_prefix}3.${Font_color_suffix}  修改 加密配置
- ${Green_font_prefix}4.${Font_color_suffix}  修改 TFO 配置
-——————————————————————————————————
- ${Green_font_prefix}5.${Font_color_suffix}  修改 全部配置" && echo
-	read -e -p "(默认: 取消):" modify
-	[[ -z "${modify}" ]] && echo "已取消..." && exit 1
-	if [[ "${modify}" == "1" ]]; then
-		Read_config
-		Set_port
-		password=${password}
-		cipher=${cipher}
-		tfo=${tfo}
-		Write_config
-		Restart
-	elif [[ "${modify}" == "2" ]]; then
-		Read_config
-		Set_password
-		port=${port}
-		cipher=${cipher}
-		tfo=${tfo}
-		Write_config
-		Restart
-	elif [[ "${modify}" == "3" ]]; then
-		Read_config
-		Set_cipher
-		port=${port}
-		password=${password}
-		tfo=${tfo}
-		Write_config
-		Restart
-	elif [[ "${modify}" == "4" ]]; then
-		Read_config
-		Set_tfo
-		cipher=${cipher}
-		port=${port}
-		password=${password}
-		Write_config
-		Restart
-	elif [[ "${modify}" == "5" ]]; then
-		Read_config
-		Set_port
-		Set_password
-		Set_cipher
-		Set_tfo
-		Write_config
-		Restart
-	else
-		echo -e "${Error} 请输入正确的数字(1-5)" && exit 1
-	fi
-}
-
-Install(){
-	[[ -e ${FILE} ]] && echo -e "${Error} 检测到 Shadowsocks-libev 已安装 !" && exit 1
-	echo -e "${Info} 开始设置 配置..."
-	Set_port
-	Set_password
-	Set_cipher
-	Set_tfo
-	echo -e "${Info} 开始安装/配置 依赖..."
-	Installation_dependency
-	echo -e "${Info} 开始下载/安装..."
-	check_new_ver
-	Pre_install
-	echo -e "${Info} 开始安装系统服务脚本..."
-	Service
-	echo -e "${Info} 开始写入 配置文件..."
-	Write_config
-	echo -e "${Info} 所有步骤 安装完毕，开始启动..."
-	Start
-}
-
-Uninstall(){
-    clear
-    printf "确认要卸载 Shadowsocks-libev 么？ (y/n)"
-    printf "\n"
-    read -e -p "(默认：n):" answer
-    [ -z "${answer}" ] && answer="n"
-
-    if [ "${answer}" == "y" ] || [ "${answer}" == "Y" ]; then
-        ps -ef | grep -v grep | grep -i "ss-server" > /dev/null 2>&1
-        systemctl stop shadowsocks-libev
-        systemctl disable shadowsocks-libev
-        rm -fr /etc/shadowsocks-libev
-        rm -f /usr/local/bin/ss-local
-        rm -f /usr/local/bin/ss-tunnel
-        rm -f /usr/local/bin/ss-server
-        rm -f /usr/local/bin/ss-manager
-        rm -f /usr/local/bin/ss-redir
-        rm -f /usr/local/bin/ss-nat
-        rm -f /usr/local/lib/libshadowsocks-libev.a
-        rm -f /usr/local/lib/libshadowsocks-libev.la
-        rm -f /usr/local/include/shadowsocks.h
-        rm -f /usr/local/lib/pkgconfig/shadowsocks-libev.pc
-        rm -f /usr/local/share/man/man1/ss-local.1
-        rm -f /usr/local/share/man/man1/ss-tunnel.1
-        rm -f /usr/local/share/man/man1/ss-server.1
-        rm -f /usr/local/share/man/man1/ss-manager.1
-        rm -f /usr/local/share/man/man1/ss-redir.1
-        rm -f /usr/local/share/man/man1/ss-nat.1
-        rm -f /usr/local/share/man/man8/shadowsocks-libev.8
-        rm -fr /usr/local/share/doc/shadowsocks-libev
-        echo "Shadowsocks-libev 卸载成功！"
-    else
-        echo
-        echo "卸载操作已取消！"
-        echo
+installBBR() {
+    result=$(lsmod | grep bbr)
+    if [[ "$result" != "" ]]; then
+        colorEcho $GREEN " BBR模块已安装"
+        INSTALL_BBR=false
+        return
     fi
-    sleep 3s
-    Start_Menu
+    res=`hostnamectl | grep -i openvz`
+    if [ "$res" != "" ]; then
+        colorEcho $YELLOW " openvz机器，跳过安装"
+        INSTALL_BBR=false
+        return
+    fi
+    
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p
+    result=$(lsmod | grep bbr)
+    if [[ "$result" != "" ]]; then
+        colorEcho $GREEN " BBR模块已启用"
+        INSTALL_BBR=false
+        return
+    fi
+
+    echo ""
+    colorEcho $BLUE " 安装BBR模块..."
+    if [[ "$PMT" = "yum" ]]; then
+        if [[ "${V6_PROXY}" = "" ]]; then
+            rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+            rpm -Uvh http://www.elrepo.org/elrepo-release-7.0-4.el7.elrepo.noarch.rpm
+            $CMD_INSTALL --enablerepo=elrepo-kernel kernel-ml
+            $CMD_REMOVE kernel-3.*
+            grub2-set-default 0
+            echo "tcp_bbr" >> /etc/modules-load.d/modules.conf
+            INSTALL_BBR=true
+        fi
+    else
+        $CMD_INSTALL --install-recommends linux-generic-hwe-16.04
+        grub-set-default 0
+        echo "tcp_bbr" >> /etc/modules-load.d/modules.conf
+        INSTALL_BBR=true
+    fi
 }
 
-Start(){
-	check_installed_status
-	check_status
-	[[ "$status" == "running" ]] && echo -e "${Info} Shadowsocks-libev 已在运行 !" && exit 1
-	systemctl start shadowsocks-libev
-	check_status
-	[[ "$status" == "running" ]] && echo -e "${Info} Shadowsocks-libev 启动成功 !"
-    sleep 3s
-    Start_Menu
+setFirewall() {
+    res=`which firewall-cmd 2>/dev/null`
+    if [[ $? -eq 0 ]]; then
+        systemctl status firewalld > /dev/null 2>&1
+        if [[ $? -eq 0 ]];then
+            firewall-cmd --permanent --add-port=${PORT}/tcp
+            firewall-cmd --permanent --add-port=${PORT}/udp
+            firewall-cmd --reload
+        else
+            nl=`iptables -nL | nl | grep FORWARD | awk '{print $1}'`
+            if [[ "$nl" != "3" ]]; then
+                iptables -I INPUT -p tcp --dport ${PORT} -j ACCEPT
+                iptables -I INPUT -p udp --dport ${PORT} -j ACCEPT
+            fi
+        fi
+    else
+        res=`which iptables 2>/dev/null`
+        if [[ $? -eq 0 ]]; then
+            nl=`iptables -nL | nl | grep FORWARD | awk '{print $1}'`
+            if [[ "$nl" != "3" ]]; then
+                iptables -I INPUT -p tcp --dport ${PORT} -j ACCEPT
+                iptables -I INPUT -p udp --dport ${PORT} -j ACCEPT
+            fi
+        else
+            res=`which ufw 2>/dev/null`
+            if [[ $? -eq 0 ]]; then
+                res=`ufw status | grep -i inactive`
+                if [[ "$res" = "" ]]; then
+                    ufw allow ${PORT}/tcp
+                    ufw allow ${PORT}/udp
+                fi
+            fi
+        fi
+    fi
 }
 
-Stop(){
-	check_installed_status
-	check_status
-	[[ !"$status" == "running"} ]] && echo -e "${Error} Shadowsocks-libev 没有运行，请检查 !" && exit 1
-	systemctl stop shadowsocks-libev
-    sleep 3s
-    Start_Menu
+showInfo() {
+    res=`status`
+    if [[ $res -lt 2 ]]; then
+        echo -e " ${RED}SS未安装，请先安装！${PLAIN}"
+        return
+    fi
+
+    port=`grep server_port $CONFIG_FILE | cut -d: -f2 | tr -d \",' '`
+    res=`netstat -nltp | grep ${port} | grep 'ss-server'`
+    [[ -z "$res" ]] && status="${RED}已停止${PLAIN}" || status="${GREEN}正在运行${PLAIN}"
+    password=`grep password $CONFIG_FILE| cut -d: -f2 | tr -d \",' '`
+    method=`grep method $CONFIG_FILE| cut -d: -f2 | tr -d \",' '`
+    
+    res=`echo -n "${method}:${password}@${IP}:${port}" | base64 -w 0`
+    link="ss://${res}"
+
+    echo ============================================
+    echo -e " ${BLUE}ss运行状态${PLAIN}：${status}"
+    echo -e " ${BLUE}ss配置文件：${PLAIN}${RED}$CONFIG_FILE${PLAIN}"
+    echo ""
+    echo -e " ${RED}ss配置信息：${PLAIN}"
+    echo -e "  ${BLUE}IP(address):${PLAIN}  ${RED}${IP}${PLAIN}"
+    echo -e "  ${BLUE}端口(port)：${PLAIN}${RED}${port}${PLAIN}"
+    echo -e "  ${BLUE}密码(password)：${PLAIN}${RED}${password}${PLAIN}"
+    echo -e "  ${BLUE}加密方式(method)：${PLAIN} ${RED}${method}${PLAIN}"
+    echo
+    echo -e " ${BLUE}ss链接${PLAIN}： ${link}"
+    #qrencode -o - -t utf8 ${link}
 }
 
-Restart(){
-	check_installed_status
-	systemctl restart shadowsocks-libev
-	echo -e "${Info} Shadowsocks-libev 重启完毕!"
-	sleep 3s
-	View
-    Start_Menu
+showQR() {
+    res=`status`
+    if [[ $res -lt 2 ]]; then
+        echo -e " ${RED}SS未安装，请先安装！${PLAIN}"
+        return
+    fi
+
+    port=`grep server_port $CONFIG_FILE | cut -d: -f2 | tr -d \",' '`
+    res=`netstat -nltp | grep ${port} | grep 'ss-server'`
+    [[ -z "$res" ]] && status="${RED}已停止${PLAIN}" || status="${GREEN}正在运行${PLAIN}"
+    password=`grep password $CONFIG_FILE| cut -d: -f2 | tr -d \",' '`
+    method=`grep method $CONFIG_FILE| cut -d: -f2 | tr -d \",' '`
+    
+    res=`echo -n "${method}:${password}@${IP}:${port}" | base64 -w 0`
+    link="ss://${res}"
+    qrencode -o - -t utf8 ${link}
 }
 
-Update(){
-	check_installed_status
-	check_new_ver
-	check_ver_comparison
-	echo -e "${Info} Shadowsocks-libev 更新完毕 !"
-    sleep 3s
-    Start_Menu
+function bbrReboot() {
+    if [ "${INSTALL_BBR}" == "true" ]; then
+        echo  
+        colorEcho $BLUE " 为使BBR模块生效，系统将在30秒后重启"
+        echo  
+        echo -e " 您可以按 ctrl + c 取消重启，稍后输入 ${RED}reboot${PLAIN} 重启系统"
+        sleep 30
+        reboot
+    fi
 }
 
-getipv4(){
-	ipv4=$(wget -qO- -4 -t1 -T2 ipinfo.io/ip)
-	if [[ -z "${ipv4}" ]]; then
-		ipv4=$(wget -qO- -4 -t1 -T2 api.ip.sb/ip)
-		if [[ -z "${ipv4}" ]]; then
-			ipv4=$(wget -qO- -4 -t1 -T2 members.3322.org/dyndns/getip)
-			if [[ -z "${ipv4}" ]]; then
-				ipv4="IPv4_Error"
-			fi
-		fi
-	fi
-}
-getipv6(){
-	ipv6=$(wget -qO- -6 -t1 -T2 ifconfig.co)
-	if [[ -z "${ipv6}" ]]; then
-		ipv6="IPv6_Error"
-	fi
+install() {
+    getData
+
+    preinstall
+    installSS
+    configSS
+    installBBR
+    setFirewall
+
+    start
+    showInfo
+
+    bbrReboot
 }
 
-urlsafe_base64(){
-	date=$(echo -n "$1"|base64|sed ':a;N;s/\n/ /g;ta'|sed 's/ //g;s/=//g;s/+/-/g;s/\//_/g')
-	echo -e "${date}"
+reconfig() {
+    res=`status`
+    if [[ $res -lt 2 ]]; then
+        echo -e " ${RED}SS未安装，请先安装！${PLAIN}"
+        return
+    fi
+    getData
+    configSS
+    restart
+    setFirewall
+
+    showInfo
 }
 
-Link_QR(){
-	if [[ "${ipv4}" != "IPv4_Error" ]]; then
-		SSbase64=$(urlsafe_base64 "${cipher}:${password}@${ipv4}:${port}")
-		SSurl="ss://${SSbase64}"
-		SSQRcode="https://cli.im/api/qrcode/code?text=${SSurl}"
-		link_ipv4=" 链接  [IPv4] : ${Red_font_prefix}${SSurl}${Font_color_suffix} \n 二维码[IPv4] : ${Red_font_prefix}${SSQRcode}${Font_color_suffix}"
-	fi
-	if [[ "${ipv6}" != "IPv6_Error" ]]; then
-		SSbase64=$(urlsafe_base64 "${cipher}:${password}@${ipv6}:${port}")
-		SSurl="ss://${SSbase64}"
-		SSQRcode="https://cli.im/api/qrcode/code?text=${SSurl}"
-		link_ipv6=" 链接  [IPv6] : ${Red_font_prefix}${SSurl}${Font_color_suffix} \n 二维码[IPv6] : ${Red_font_prefix}${SSQRcode}${Font_color_suffix}"
-	fi
+update() {
+    res=`status`
+    if [[ $res -lt 2 ]]; then
+        echo -e " ${RED}SS未安装，请先安装！${PLAIN}"
+        return
+    fi
+    installSS
+    restart
 }
 
-View(){
-	check_installed_status
-	Read_config
-	getipv4
-	getipv6
-	Link_QR
-	clear && echo
-	echo -e "Shadowsocks-libev 配置："
-	echo -e "——————————————————————————————————"
-	[[ "${ipv4}" != "IPv4_Error" ]] && echo -e " 地址\t: ${Green_font_prefix}${ipv4}${Font_color_suffix}"
-	[[ "${ipv6}" != "IPv6_Error" ]] && echo -e " 地址\t: ${Green_font_prefix}${ipv6}${Font_color_suffix}"
-	echo -e " 端口\t: ${Green_font_prefix}${port}${Font_color_suffix}"
-	echo -e " 密码\t: ${Green_font_prefix}${password}${Font_color_suffix}"
-	echo -e " 加密\t: ${Green_font_prefix}${cipher}${Font_color_suffix}"
-	echo -e " TFO\t: ${Green_font_prefix}${tfo}${Font_color_suffix}"
-	[[ ! -z "${link_ipv4}" ]] && echo -e "${link_ipv4}"
-	[[ ! -z "${link_ipv6}" ]] && echo -e "${link_ipv6}"
-	echo -e "——————————————————————————————————"
-	Before_Start_Menu
+start() {
+    res=`status`
+    if [[ $res -lt 2 ]]; then
+        echo -e " ${RED}SS未安装，请先安装！${PLAIN}"
+        return
+    fi
+    systemctl restart ${NAME}
+    sleep 2
+    port=`grep server_port $CONFIG_FILE | cut -d: -f2 | tr -d \",' '`
+    res=`ss -nltp | grep ${port} | grep ss-server`
+    if [[ "$res" = "" ]]; then
+        colorEcho $RED " SS启动失败，请检查端口是否被占用！"
+    else
+        colorEcho $BLUE " SS启动成功！"
+    fi
 }
 
-Status(){
-	echo -e "${Info} 获取 Shadowsocks-libev 活动日志 ……"
-	echo -e "${Tip} 返回主菜单请按 q ！"
-	systemctl status shadowsocks-libev
-	# Start_Menu
+restart() {
+    res=`status`
+    if [[ $res -lt 2 ]]; then
+        echo -e " ${RED}SS未安装，请先安装！${PLAIN}"
+        return
+    fi
+
+    stop
+    start
 }
 
-Update_Shell(){
-	echo -e "当前版本为 [ ${sh_ver} ]，开始检测最新版本..."
-	sh_new_ver=$(wget --no-check-certificate -qO- "https://github.com/Animekone/Shadowsocks-libev/blob/master/shadowsocks-libev.sh"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1)
-	[[ -z ${sh_new_ver} ]] && echo -e "${Error} 检测最新版本失败 !" && Start_Menu
-	if [[ ${sh_new_ver} != ${sh_ver} ]]; then
-		echo -e "发现新版本[ ${sh_new_ver} ]，是否更新？[Y/n]"
-		read -p "(默认: y):" yn
-		[[ -z "${yn}" ]] && yn="y"
-		if [[ ${yn} == [Yy] ]]; then
-			wget -O ss-libev.sh --no-check-certificate https://github.com/Animekone/Shadowsocks-libev/blob/master/shadowsocks-libev.sh && chmod +x ss-libev.sh
-			echo -e "脚本已更新为最新版本[ ${sh_new_ver} ] !"
-			echo -e "3s后执行新脚本"
-            sleep 3s
-            bash ss-libev.sh
-		else
-			echo && echo "	已取消..." && echo
-            sleep 3s
-            Start_Menu
-		fi
-	else
-		echo -e "当前已是最新版本[ ${sh_new_ver} ] !"
-		sleep 3s
-        Start_Menu
-	fi
-	sleep 3s
-    	bash ss-libev.sh
+stop() {
+    res=`status`
+    if [[ $res -lt 2 ]]; then
+        echo -e " ${RED}SS未安装，请先安装！${PLAIN}"
+        return
+    fi
+    systemctl stop ${NAME}
+    colorEcho $BLUE " SS停止成功"
 }
 
-Before_Start_Menu() {
-    echo && echo -n -e "${yellow}* 按回车返回主菜单 *${plain}" && read temp
-    Start_Menu
+uninstall() {
+    res=`status`
+    if [[ $res -lt 2 ]]; then
+        echo -e " ${RED}SS未安装，请先安装！${PLAIN}"
+        return
+    fi
+
+    echo ""
+    read -p " 确定卸载SS吗？(y/n)" answer
+    [[ -z ${answer} ]] && answer="n"
+
+    if [[ "${answer}" == "y" ]] || [[ "${answer}" == "Y" ]]; then
+        systemctl stop ${NAME} && systemctl disable ${NAME}
+        rm -rf $SERVICE_FILE
+        cd /usr/local/bin && rm -rf ss-local ss-manager ss-nat ss-redir ss-server ss-tunnel
+        rm -rf /usr/lib64/libshadowsocks-libev*
+        rm -rf /usr/share/doc/shadowsocks-libev*
+        rm -rf /usr/share/man/man1/ss-*.gz
+        rm -rf /usr/share/man/man8/shadowsocks-libev*
+        colorEcho $GREEN " SS卸载成功"
+    fi
 }
 
-Start_Menu(){
-clear
-check_root
-check_sys
-get_latest_version
+showLog() {
+    res=`status`
+    if [[ $res -lt 2 ]]; then
+        echo -e " ${RED}SS未安装，请先安装！${PLAIN}"
+        return
+    fi
+    journalctl -xen --no-pager -u ${NAME}
+}
+
+menu() {
+    clear
+    echo "#############################################################"
+    echo -e "#              ${RED}Shadowsocks/SS 一键安装脚本${PLAIN}                #"
+    echo -e "# ${GREEN}作者${PLAIN}: Animekone                                        #"
+    echo -e "# ${GREEN}网址${PLAIN}: https://github.com/Animekone                                    #"
+    echo -e "# ${GREEN}论坛${PLAIN}: https://github.com/Animekone                                   #"
+    echo "#############################################################"
+    echo ""
+
+    echo -e "  ${GREEN}1.${PLAIN}  安装SS"
+    echo -e "  ${GREEN}2.${PLAIN}  更新SS"
+    echo -e "  ${GREEN}3.  ${RED}卸载SS${PLAIN}"
+    echo " -------------"
+    echo -e "  ${GREEN}4.${PLAIN}  启动SS"
+    echo -e "  ${GREEN}5.${PLAIN}  重启SS"
+    echo -e "  ${GREEN}6.${PLAIN}  停止SS"
+    echo " -------------"
+    echo -e "  ${GREEN}7.${PLAIN}  查看SS配置"
+    echo -e "  ${GREEN}8.${PLAIN}  查看配置二维码"
+    echo -e "  ${GREEN}9.  ${RED}修改SS配置${PLAIN}"
+    echo -e "  ${GREEN}10.${PLAIN} 查看SS日志"
+    echo " -------------"
+    echo -e "  ${GREEN}0.${PLAIN} 退出"
+    echo 
+    echo -n " 当前状态："
+    statusText
+    echo 
+
+    read -p " 请选择操作[0-10]：" answer
+    case $answer in
+        0)
+            exit 0
+            ;;
+        1)
+            install
+            ;;
+        2)
+            update
+            ;;
+        3)
+            uninstall
+            ;;
+        4)
+            start
+            ;;
+        5)
+            restart
+            ;;
+        6)
+            stop
+            ;;
+        7)
+            showInfo
+            ;;
+        8)
+            showQR
+            ;;
+        9)
+            reconfig
+            ;;
+        10)
+            showLog
+            ;;
+        *)
+            echo -e "$RED 请选择正确的操作！${PLAIN}"
+            exit 1
+            ;;
+    esac
+}
+
+checkSystem
+
 action=$1
-	echo && echo -e "  
-==================================
-Shadowsocks-libev 管理脚本 ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix}
-==================================
- ${Green_font_prefix} 0.${Font_color_suffix} 更新脚本
-——————————————————————————————————
- ${Green_font_prefix} 1.${Font_color_suffix} 安装 Shadowsocks-libev
- ${Green_font_prefix} 2.${Font_color_suffix} 更新 Shadowsocks-libev
- ${Green_font_prefix} 3.${Font_color_suffix} 卸载 Shadowsocks-libev
-——————————————————————————————————
- ${Green_font_prefix} 4.${Font_color_suffix} 启动 Shadowsocks-libev
- ${Green_font_prefix} 5.${Font_color_suffix} 停止 Shadowsocks-libev
- ${Green_font_prefix} 6.${Font_color_suffix} 重启 Shadowsocks-libev
-——————————————————————————————————
- ${Green_font_prefix} 7.${Font_color_suffix} 设置 配置信息
- ${Green_font_prefix} 8.${Font_color_suffix} 查看 配置信息
- ${Green_font_prefix} 9.${Font_color_suffix} 查看 运行状态
-——————————————————————————————————
- ${Green_font_prefix} 10.${Font_color_suffix} 退出脚本
-==================================" && echo
-	if [[ -e ${FILE} ]]; then
-		check_status
-		if [[ "$status" == "running" ]]; then
-			echo -e " 当前状态: ${Green_font_prefix}已安装${Font_color_suffix} 并 ${Green_font_prefix}已启动${Font_color_suffix}"
-		else
-			echo -e " 当前状态: ${Green_font_prefix}已安装${Font_color_suffix} 但 ${Red_font_prefix}未启动${Font_color_suffix}"
-		fi
-	else
-		echo -e " 当前状态: ${Red_font_prefix}未安装${Font_color_suffix}"
-	fi
-	echo
-	read -e -p " 请输入数字 [0-10]:" num
-	case "$num" in
-		0)
-		Update_Shell
-		;;
-		1)
-		Install
-		;;
-		2)
-		Update
-		;;
-		3)
-		Uninstall
-		;;
-		4)
-		Start
-		;;
-		5)
-		Stop
-		;;
-		6)
-		Restart
-		;;
-		7)
-		Set
-		;;
-		8)
-		View
-		;;
-		9)
-		Status
-		;;
-		10)
-		exit 1
-		;;
-		*)
-		echo "请输入正确数字 [0-10]"
-		;;
-	esac
-}
-Start_Menu
+[[ -z $1 ]] && action=menu
+case "$action" in
+    menu|install|update|uninstall|start|restart|stop|showInfo|showQR|showLog)
+        ${action}
+        ;;
+    *)
+        echo " 参数错误"
+        echo " 用法: `basename $0` [menu|install|update|uninstall|start|restart|stop|showInfo|showQR|showLog]"
+        ;;
+esac
