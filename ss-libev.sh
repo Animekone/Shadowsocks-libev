@@ -5,8 +5,8 @@ export PATH
 #=================================================
 #	System Required: CentOS/Debian/Ubuntu
 #	Description: Shadowsocks libev 管理脚本
-#	Author: animekone
-#	WebSite: https://github.com/Animekone
+#	Author:animekone
+#	WebSite:https://github.com/Animekone
 #=================================================
 
 sh_ver="1.4.1"
