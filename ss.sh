@@ -254,20 +254,20 @@ installNewVer() {
     make && make install
     if [[ $? -ne 0 ]]; then
         echo
-        echo -e " [${RED}错误${PLAIN}]: $OS Shadowsocks-libev 安装失败！ 请打开 https://tizi.blog 反馈"
+        echo -e " [${RED}错误${PLAIN}]: $OS Shadowsocks-libev 安装失败！ 请打开 https://github.com/Animekone 反馈"
         cd ${BASE} && rm -rf shadowsocks-libev*
         exit 1
     fi
     ssPath=`which ss-server 2>/dev/null`
     [[ "$ssPath" != "" ]] || {
         cd ${BASE} && rm -rf shadowsocks-libev*
-        colorEcho $RED " SS安装失败，请到 https://tizi.blog 反馈"
+        colorEcho $RED " SS安装失败，请到 https://github.com/Animekone 反馈"
         exit 1
     }
     cat > $SERVICE_FILE <<-EOF
 [Unit]
 Description=shadowsocks
-Documentation=https://tizi.blog
+Documentation=https://github.com/Animekone
 After=network-online.target
 Wants=network-online.target
 
@@ -583,10 +583,10 @@ showLog() {
 menu() {
     clear
     echo "#############################################################"
-    echo -e "#              ${RED}Shadowsocks/SS 一键安装脚本${PLAIN}                #"
-    echo -e "# ${GREEN}作者${PLAIN}: Animekone                                        #"
-    echo -e "# ${GREEN}网址${PLAIN}: https://github.com/Animekone                                    #"
-    echo -e "# ${GREEN}论坛${PLAIN}: https://github.com/Animekone                                   #"
+    echo -e "#              ${RED}Shadowsocks/SS 一键安装脚本${PLAIN}                    #"
+    echo -e "# ${GREEN}作者${PLAIN}: Animekone                                             #"
+    echo -e "# ${GREEN}网址${PLAIN}: https://github.com/Animekone                          #"
+    echo -e "# ${GREEN}论坛${PLAIN}: https://github.com/Animekone                          #"
     echo "#############################################################"
     echo ""
 
